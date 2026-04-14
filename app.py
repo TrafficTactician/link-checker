@@ -57,31 +57,38 @@ def clean_domain(url):
     return url
 
 def get_sellers_for_domain(domain, headers, cookies, csrf_token):
-    """Точечный запрос продавцов, если сервер не отдал их в общей пачке"""
+    """Точечный запрос продавцов с защитой от 429 ошибки"""
     url = "https://linkdetective.pro/api/domains"
     payload = {
         "draw": 1, "start": 0, "length": 10,
         "_token": csrf_token, "domains": [domain],
-        "price": "min", "blacklist": [2, 8] # ИСПРАВЛЕНО: добавил обязательный фильтр сайта
+        "price": "min", "blacklist": [2, 8]
     }
-    try:
-        response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            sellers = data.get('sellers', {})
-            if isinstance(sellers, dict):
-                # Умный поиск (на случай пробелов в ключах сервера)
-                for k, v in sellers.items():
-                    if domain in k.lower():
-                        return v
-            elif isinstance(sellers, list):
-                return sellers
-    except Exception:
-        pass
+    
+    # Делаем до 3 попыток, если сервер нас тормозит
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                sellers = data.get('sellers', {})
+                if isinstance(sellers, dict):
+                    for k, v in sellers.items():
+                        if domain in k.lower():
+                            return v
+                elif isinstance(sellers, list):
+                    return sellers
+                break # Успех - выходим из цикла попыток
+            elif response.status_code == 429:
+                time.sleep(5) # Ждем 5 сек и пробуем снова
+            else:
+                break
+        except Exception:
+            time.sleep(2)
+            
     return []
 
 def extract_dicts(data):
-    """Мощный извлекатель данных из любых кривых массивов PHP"""
     extracted = []
     if isinstance(data, str):
         data = data.strip()
@@ -181,8 +188,6 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
             
             all_items = []
             all_sellers_data_initial = {}
-            
-            # ИСПРАВЛЕНО: Уменьшили пачку до 20, чтобы сервер успевал найти всех продавцов
             chunk_size = 20 
             
             for i in range(0, len(new_domains), chunk_size):
@@ -194,32 +199,45 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                     "price": "min", "blacklist": [2, 8]
                 }
                 
-                try:
-                    response = requests.post("https://linkdetective.pro/api/domains", json=payload, headers=headers, cookies=cookies)
-                    
-                    if response.status_code == 200:
-                        data = response.json()
-                        chunk_items = data.get('data', [])
+                success = False
+                # Умный цикл повтора при ошибках
+                for attempt in range(3):
+                    try:
+                        response = requests.post("https://linkdetective.pro/api/domains", json=payload, headers=headers, cookies=cookies, timeout=20)
                         
-                        if chunk_items:
-                            all_items.extend(chunk_items)
+                        if response.status_code == 200:
+                            data = response.json()
+                            chunk_items = data.get('data', [])
+                            if chunk_items:
+                                all_items.extend(chunk_items)
+                            chunk_sellers = data.get('sellers', {})
+                            if isinstance(chunk_sellers, dict):
+                                all_sellers_data_initial.update(chunk_sellers)
+                            success = True
+                            break # Успех - выходим из цикла попыток
                             
-                        chunk_sellers = data.get('sellers', {})
-                        if isinstance(chunk_sellers, dict):
-                            all_sellers_data_initial.update(chunk_sellers)
+                        elif response.status_code == 429:
+                            status_text.warning(f"⏳ Сервер просит притормозить (Ошибка 429). Ждем 10 секунд... (Попытка {attempt+1}/3)")
+                            time.sleep(10) # Умная пауза
+                            continue
                             
-                    elif response.status_code == 419:
-                        st.error("Ошибка 419: Токен отторгается. Проверь ключи.")
-                        st.stop()
-                    else:
-                        st.error(f"Ошибка сервера: {response.status_code}")
-                        st.stop()
-                        
-                except Exception as e:
-                    st.error(f"Произошла ошибка соединения: {e}")
-                    st.stop()
+                        elif response.status_code == 419:
+                            st.error("Ошибка 419: Токен отторгается. Проверь ключи.")
+                            st.stop()
+                        else:
+                            st.error(f"Ошибка сервера: {response.status_code}")
+                            st.stop()
+                            
+                    except Exception as e:
+                        status_text.warning(f"Сбой сети. Повтор через 5 секунд... (Попытка {attempt+1}/3)")
+                        time.sleep(5)
                 
-                time.sleep(0.5)
+                if not success:
+                    st.error("Не удалось пробиться через защиту сервера после 3 попыток. Попробуй позже.")
+                    st.stop()
+                    
+                # Увеличенная базовая пауза между пачками, чтобы не провоцировать 429
+                time.sleep(1.5)
             
             total_items = len(all_items)
             if total_items == 0:
@@ -235,7 +253,6 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                     status_text.info(f"Сбор контактов ({index + 1} из {total_items}): {domain}")
                     is_bought = "✅ Да" if domain in bought_domains else "❌ Нет"
                     
-                    # ИСПРАВЛЕНО: Умный поиск ключа продавца
                     domain_sellers_raw = []
                     if isinstance(all_sellers_data_initial, dict):
                         for k, v in all_sellers_data_initial.items():
@@ -245,7 +262,7 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                     
                     if not domain_sellers_raw:
                         domain_sellers_raw = get_sellers_for_domain(domain, headers, cookies, st.session_state.csrf_token)
-                        time.sleep(0.3) 
+                        time.sleep(0.5) # Немного увеличил паузу при точечном запросе
                     
                     domain_sellers_clean = clean_sellers_data(domain_sellers_raw)
                     sellers_details[domain] = domain_sellers_clean
@@ -267,7 +284,7 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                 
                 st.session_state.results = results
                 st.session_state.sellers_details = sellers_details
-                status_text.success(f"✅ Проверка успешно завершена! Найдено доменов: {total_items}")
+                status_text.success(f"✅ Проверка успешно завершена! Обработано доменов: {total_items}")
 
     if st.session_state.results:
         st.divider()
