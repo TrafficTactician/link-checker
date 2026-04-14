@@ -48,7 +48,6 @@ def clean_cookie_string(raw_str, prefix=None):
     return res
 
 def clean_domain(url):
-    """Мощный очиститель: убирает пробелы, http://, www. и слэши"""
     url = url.strip().lower()
     if not url: return ""
     url = re.sub(r'^https?://', '', url)
@@ -58,19 +57,23 @@ def clean_domain(url):
     return url
 
 def get_sellers_for_domain(domain, headers, cookies, csrf_token):
+    """Точечный запрос продавцов, если сервер не отдал их в общей пачке"""
     url = "https://linkdetective.pro/api/domains"
     payload = {
-        "draw": 1, "start": 0, "length": 1,
+        "draw": 1, "start": 0, "length": 10,
         "_token": csrf_token, "domains": [domain],
-        "price": "min", "blacklist": []
+        "price": "min", "blacklist": [2, 8] # ИСПРАВЛЕНО: добавил обязательный фильтр сайта
     }
     try:
-        response = requests.post(url, json=payload, headers=headers, cookies=cookies)
+        response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=15)
         if response.status_code == 200:
             data = response.json()
             sellers = data.get('sellers', {})
             if isinstance(sellers, dict):
-                return sellers.get(domain, [])
+                # Умный поиск (на случай пробелов в ключах сервера)
+                for k, v in sellers.items():
+                    if domain in k.lower():
+                        return v
             elif isinstance(sellers, list):
                 return sellers
     except Exception:
@@ -78,13 +81,17 @@ def get_sellers_for_domain(domain, headers, cookies, csrf_token):
     return []
 
 def extract_dicts(data):
+    """Мощный извлекатель данных из любых кривых массивов PHP"""
     extracted = []
     if isinstance(data, str):
+        data = data.strip()
         try:
-            data = json.loads(data)
+            parsed = json.loads(data)
+            return extract_dicts(parsed)
         except Exception:
             try:
-                data = ast.literal_eval(data)
+                parsed = ast.literal_eval(data)
+                return extract_dicts(parsed)
             except Exception:
                 pass
                 
@@ -139,12 +146,10 @@ with st.sidebar:
 if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_state.session_cookie:
     
     raw_xsrf = urllib.parse.unquote(st.session_state.xsrf_token)
-    
     cookies = {
         "XSRF-TOKEN": st.session_state.xsrf_token,
         "linkdetective_session": st.session_state.session_cookie
     }
-    
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
         "X-CSRF-TOKEN": st.session_state.csrf_token, 
@@ -163,11 +168,8 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
         new_input = st.text_area("Вставь список:", height=150, key="new_txt")
 
     if st.button("🚀 Проверить домены", type="primary"):
-        # Используем умную очистку доменов
         bought_domains = set([clean_domain(d) for d in bought_input.splitlines() if clean_domain(d)])
         new_domains = [clean_domain(d) for d in new_input.splitlines() if clean_domain(d)]
-        
-        # Удаляем дубликаты из списка поиска, чтобы не нагружать сервер
         new_domains = list(dict.fromkeys(new_domains))
         
         if not new_domains:
@@ -175,14 +177,13 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
         else:
             progress_bar = st.progress(0)
             status_text = st.empty()
-            
             status_text.info(f"Связываемся с базой... Ищем {len(new_domains)} уникальных доменов.")
             
             all_items = []
             all_sellers_data_initial = {}
             
-            # --- НОВАЯ ЛОГИКА: РАЗБИВАЕМ ДОМЕНЫ НА БЕЗОПАСНЫЕ ПАЧКИ ПО 50 ШТУК ---
-            chunk_size = 50
+            # ИСПРАВЛЕНО: Уменьшили пачку до 20, чтобы сервер успевал найти всех продавцов
+            chunk_size = 20 
             
             for i in range(0, len(new_domains), chunk_size):
                 chunk = new_domains[i:i + chunk_size]
@@ -218,10 +219,8 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                     st.error(f"Произошла ошибка соединения: {e}")
                     st.stop()
                 
-                # Небольшая пауза между пачками, чтобы сайт нас не забанил
                 time.sleep(0.5)
             
-            # --- ОБРАБАТЫВАЕМ ВСЕ НАЙДЕННЫЕ ДОМЕНЫ ---
             total_items = len(all_items)
             if total_items == 0:
                 status_text.warning("Сайт не нашел данные ни по одному из указанных доменов.")
@@ -234,12 +233,15 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                         
                     domain = str(item.get('Domain', '')).strip().lower()
                     status_text.info(f"Сбор контактов ({index + 1} из {total_items}): {domain}")
-                    
                     is_bought = "✅ Да" if domain in bought_domains else "❌ Нет"
                     
+                    # ИСПРАВЛЕНО: Умный поиск ключа продавца
                     domain_sellers_raw = []
                     if isinstance(all_sellers_data_initial, dict):
-                         domain_sellers_raw = all_sellers_data_initial.get(domain, [])
+                        for k, v in all_sellers_data_initial.items():
+                            if domain in k.lower():
+                                domain_sellers_raw = v
+                                break
                     
                     if not domain_sellers_raw:
                         domain_sellers_raw = get_sellers_for_domain(domain, headers, cookies, st.session_state.csrf_token)
@@ -265,13 +267,10 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                 
                 st.session_state.results = results
                 st.session_state.sellers_details = sellers_details
-                
                 status_text.success(f"✅ Проверка успешно завершена! Найдено доменов: {total_items}")
 
-    # Отрисовка результатов с фильтром
     if st.session_state.results:
         st.divider()
-        
         filter_option = st.radio(
             "🎛️ Фильтр доменов:",
             ["Показать все", "Скрыть домены с Collaborator"],
