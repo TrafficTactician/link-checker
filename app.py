@@ -1,4 +1,3 @@
-
 import streamlit as st
 import requests
 import pandas as pd
@@ -6,6 +5,8 @@ import time
 import json
 import ast
 import os
+import re
+import urllib.parse
 
 st.set_page_config(page_title="Link Checker Pro", layout="wide")
 
@@ -40,12 +41,21 @@ if "sellers_details" not in st.session_state:
     st.session_state.sellers_details = {}
 
 def clean_cookie_string(raw_str, prefix=None):
-    """Очищает строку от мусора"""
     res = raw_str.strip()
     if prefix and res.startswith(prefix + "="):
         res = res.replace(prefix + "=", "", 1)
     res = res.split(';')[0].strip()
     return res
+
+def clean_domain(url):
+    """Мощный очиститель: убирает пробелы, http://, www. и слэши"""
+    url = url.strip().lower()
+    if not url: return ""
+    url = re.sub(r'^https?://', '', url)
+    url = url.split('/')[0]
+    if url.startswith('www.'):
+        url = url[4:]
+    return url
 
 def get_sellers_for_domain(domain, headers, cookies, csrf_token):
     url = "https://linkdetective.pro/api/domains"
@@ -96,7 +106,7 @@ def clean_sellers_data(raw_data):
         
         cleaned_list.append({
             "Продавец / Контакт": str(seller_name),
-            "Цена ($)": pd.to_numeric(price, errors='coerce'),
+            "Цена ($)": pd.to_numeric(price, errors='coerce'), 
             "Обновлено": str(date)
         })
     return cleaned_list
@@ -106,11 +116,11 @@ st.title("🕵️‍♂️ Link Checker Pro (Аутрич)")
 
 with st.sidebar:
     st.header("🔑 Авторизация")
-    st.markdown("Вставь 3 ключа для обхода защиты Cloudflare. Сохраняется автоматически.")
+    st.markdown("Вставь 3 ключа для обхода защиты. Сохраняется автоматически.")
     
-    input_csrf = st.text_input("1. CSRF-TOKEN (из кода страницы):", value=st.session_state.csrf_token, type="password")
+    input_csrf = st.text_input("1. CSRF-TOKEN (из кода):", value=st.session_state.csrf_token, type="password")
     input_xsrf = st.text_input("2. XSRF-TOKEN (из Cookies):", value=st.session_state.xsrf_token, type="password")
-    input_session = st.text_input("3. linkdetective_session (из Cookies):", value=st.session_state.session_cookie, type="password")
+    input_session = st.text_input("3. linkdetective_session:", value=st.session_state.session_cookie, type="password")
     
     if st.button("Сохранить доступы", use_container_width=True):
         clean_csrf = clean_cookie_string(input_csrf)
@@ -128,7 +138,6 @@ with st.sidebar:
 
 if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_state.session_cookie:
     
-    import urllib.parse
     raw_xsrf = urllib.parse.unquote(st.session_state.xsrf_token)
     
     cookies = {
@@ -138,7 +147,7 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
     
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-        "X-CSRF-TOKEN": st.session_state.csrf_token,
+        "X-CSRF-TOKEN": st.session_state.csrf_token, 
         "X-Requested-With": "XMLHttpRequest",
         "Referer": "https://linkdetective.pro/"
     }
@@ -154,8 +163,12 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
         new_input = st.text_area("Вставь список:", height=150, key="new_txt")
 
     if st.button("🚀 Проверить домены", type="primary"):
-        bought_domains = set([d.strip().lower() for d in bought_input.split('\n') if d.strip()])
-        new_domains = [d.strip().lower() for d in new_input.split('\n') if d.strip()]
+        # Используем умную очистку доменов
+        bought_domains = set([clean_domain(d) for d in bought_input.splitlines() if clean_domain(d)])
+        new_domains = [clean_domain(d) for d in new_input.splitlines() if clean_domain(d)]
+        
+        # Удаляем дубликаты из списка поиска, чтобы не нагружать сервер
+        new_domains = list(dict.fromkeys(new_domains))
         
         if not new_domains:
             st.warning("Введи домены для проверки.")
@@ -163,99 +176,99 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            status_text.info(f"Связываемся с базой... Ищем {len(new_domains)} доменов.")
+            status_text.info(f"Связываемся с базой... Ищем {len(new_domains)} уникальных доменов.")
             
             all_items = []
             all_sellers_data_initial = {}
             
-            start = 0
-            length = 500
+            # --- НОВАЯ ЛОГИКА: РАЗБИВАЕМ ДОМЕНЫ НА БЕЗОПАСНЫЕ ПАЧКИ ПО 50 ШТУК ---
+            chunk_size = 50
             
-            try:
-                while True:
-                    payload = {
-                        "draw": 1, "start": start, "length": length,
-                        "_token": st.session_state.csrf_token, "domains": new_domains,
-                        "price": "min", "blacklist": [2, 8]
-                    }
-                    
+            for i in range(0, len(new_domains), chunk_size):
+                chunk = new_domains[i:i + chunk_size]
+                
+                payload = {
+                    "draw": 1, "start": 0, "length": 100, 
+                    "_token": st.session_state.csrf_token, "domains": chunk,
+                    "price": "min", "blacklist": [2, 8]
+                }
+                
+                try:
                     response = requests.post("https://linkdetective.pro/api/domains", json=payload, headers=headers, cookies=cookies)
                     
                     if response.status_code == 200:
                         data = response.json()
                         chunk_items = data.get('data', [])
                         
-                        if not chunk_items:
-                            break
+                        if chunk_items:
+                            all_items.extend(chunk_items)
                             
-                        all_items.extend(chunk_items)
-                        
                         chunk_sellers = data.get('sellers', {})
                         if isinstance(chunk_sellers, dict):
                             all_sellers_data_initial.update(chunk_sellers)
                             
-                        records_filtered = data.get('recordsFiltered', 0)
-                        start += len(chunk_items)
-                        
-                        if start >= records_filtered:
-                            break
-                            
                     elif response.status_code == 419:
-                        st.error("Ошибка 419: Токен отторгается. Проверь, все ли 3 ключа скопированы из одной активной сессии браузера.")
+                        st.error("Ошибка 419: Токен отторгается. Проверь ключи.")
                         st.stop()
                     else:
                         st.error(f"Ошибка сервера: {response.status_code}")
                         st.stop()
+                        
+                except Exception as e:
+                    st.error(f"Произошла ошибка соединения: {e}")
+                    st.stop()
                 
-                total_items = len(all_items)
-                if total_items == 0:
-                    status_text.warning("Сайт не нашел данные ни по одному из указанных доменов.")
-                else:
-                    results = []
-                    sellers_details = {}
+                # Небольшая пауза между пачками, чтобы сайт нас не забанил
+                time.sleep(0.5)
+            
+            # --- ОБРАБАТЫВАЕМ ВСЕ НАЙДЕННЫЕ ДОМЕНЫ ---
+            total_items = len(all_items)
+            if total_items == 0:
+                status_text.warning("Сайт не нашел данные ни по одному из указанных доменов.")
+            else:
+                results = []
+                sellers_details = {} 
+                
+                for index, item in enumerate(all_items):
+                    if not isinstance(item, dict): continue
+                        
+                    domain = str(item.get('Domain', '')).strip().lower()
+                    status_text.info(f"Сбор контактов ({index + 1} из {total_items}): {domain}")
                     
-                    for index, item in enumerate(all_items):
-                        if not isinstance(item, dict): continue
-                            
-                        domain = str(item.get('Domain', '')).strip().lower()
-                        status_text.info(f"Сбор контактов ({index + 1} из {total_items}): {domain}")
-                        
-                        is_bought = "✅ Да" if domain in bought_domains else "❌ Нет"
-                        
-                        domain_sellers_raw = []
-                        if isinstance(all_sellers_data_initial, dict):
-                             domain_sellers_raw = all_sellers_data_initial.get(domain, [])
-                        
-                        if not domain_sellers_raw:
-                            domain_sellers_raw = get_sellers_for_domain(domain, headers, cookies, st.session_state.csrf_token)
-                            time.sleep(0.3)
-                        
-                        domain_sellers_clean = clean_sellers_data(domain_sellers_raw)
-                        sellers_details[domain] = domain_sellers_clean
-                        
-                        has_collaborator = "❌ Нет"
-                        raw_string = str(domain_sellers_raw).lower()
-                        if 'collaborator.pro' in raw_string:
-                            has_collaborator = "✅ Да"
-                        
-                        results.append({
-                            "Домен": domain,
-                            "Уже покупали?": is_bought,
-                            "Есть на Collaborator?": has_collaborator,
-                            "Цена (от)": item.get('Price', ''),
-                            "DR": item.get('DR', ''),
-                            "Трафик": item.get('Traffic', '')
-                        })
-                        progress_bar.progress((index + 1) / total_items)
+                    is_bought = "✅ Да" if domain in bought_domains else "❌ Нет"
                     
-                    st.session_state.results = results
-                    st.session_state.sellers_details = sellers_details
+                    domain_sellers_raw = []
+                    if isinstance(all_sellers_data_initial, dict):
+                         domain_sellers_raw = all_sellers_data_initial.get(domain, [])
                     
-                    status_text.success(f"✅ Проверка успешно завершена! Обработано доменов: {total_items}")
+                    if not domain_sellers_raw:
+                        domain_sellers_raw = get_sellers_for_domain(domain, headers, cookies, st.session_state.csrf_token)
+                        time.sleep(0.3) 
                     
-            except Exception as e:
-                st.error(f"Произошла ошибка: {e}")
+                    domain_sellers_clean = clean_sellers_data(domain_sellers_raw)
+                    sellers_details[domain] = domain_sellers_clean
+                    
+                    has_collaborator = "❌ Нет"
+                    raw_string = str(domain_sellers_raw).lower()
+                    if 'collaborator.pro' in raw_string:
+                        has_collaborator = "✅ Да"
+                    
+                    results.append({
+                        "Домен": domain,
+                        "Уже покупали?": is_bought,
+                        "Есть на Collaborator?": has_collaborator,
+                        "Цена (от)": item.get('Price', ''),
+                        "DR": item.get('DR', ''),
+                        "Трафик": item.get('Traffic', '')
+                    })
+                    progress_bar.progress((index + 1) / total_items)
+                
+                st.session_state.results = results
+                st.session_state.sellers_details = sellers_details
+                
+                status_text.success(f"✅ Проверка успешно завершена! Найдено доменов: {total_items}")
 
+    # Отрисовка результатов с фильтром
     if st.session_state.results:
         st.divider()
         
@@ -289,7 +302,7 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                         seller_df = seller_df.sort_values(by="Цена ($)", na_position="last").reset_index(drop=True)
                     
                     st.dataframe(
-                        seller_df,
+                        seller_df, 
                         use_container_width=True,
                         hide_index=True,
                         column_config={
