@@ -57,35 +57,25 @@ def clean_domain(url):
     return url
 
 def get_sellers_for_domain(domain, headers, cookies, csrf_token):
-    """Точечный запрос продавцов с защитой от 429 ошибки"""
     url = "https://linkdetective.pro/api/domains"
     payload = {
         "draw": 1, "start": 0, "length": 10,
         "_token": csrf_token, "domains": [domain],
         "price": "min", "blacklist": [2, 8]
     }
-    
-    # Делаем до 3 попыток, если сервер нас тормозит
-    for attempt in range(3):
-        try:
-            response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=15)
-            if response.status_code == 200:
-                data = response.json()
-                sellers = data.get('sellers', {})
-                if isinstance(sellers, dict):
-                    for k, v in sellers.items():
-                        if domain in k.lower():
-                            return v
-                elif isinstance(sellers, list):
-                    return sellers
-                break # Успех - выходим из цикла попыток
-            elif response.status_code == 429:
-                time.sleep(5) # Ждем 5 сек и пробуем снова
-            else:
-                break
-        except Exception:
-            time.sleep(2)
-            
+    try:
+        response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            sellers = data.get('sellers', {})
+            if isinstance(sellers, dict):
+                for k, v in sellers.items():
+                    if domain in k.lower():
+                        return v
+            elif isinstance(sellers, list):
+                return sellers
+    except Exception:
+        pass
     return []
 
 def extract_dicts(data):
@@ -130,13 +120,13 @@ st.title("🕵️‍♂️ Link Checker Pro (Аутрич)")
 
 with st.sidebar:
     st.header("🔑 Авторизация")
-    st.markdown("Вставь 3 ключа для обхода защиты. Сохраняется автоматически.")
+    st.markdown("Вставь 3 ключа из **одной активной сессии**.")
     
     input_csrf = st.text_input("1. CSRF-TOKEN (из кода):", value=st.session_state.csrf_token, type="password")
     input_xsrf = st.text_input("2. XSRF-TOKEN (из Cookies):", value=st.session_state.xsrf_token, type="password")
     input_session = st.text_input("3. linkdetective_session:", value=st.session_state.session_cookie, type="password")
     
-    if st.button("Сохранить доступы", use_container_width=True):
+    if st.button("💾 Сохранить доступы", use_container_width=True):
         clean_csrf = clean_cookie_string(input_csrf)
         clean_xsrf = clean_cookie_string(input_xsrf, "XSRF-TOKEN")
         clean_session = clean_cookie_string(input_session, "linkdetective_session")
@@ -147,6 +137,18 @@ with st.sidebar:
         save_cookies(clean_csrf, clean_xsrf, clean_session)
         
         st.success("Все 3 ключа сохранены!")
+        time.sleep(1)
+        st.rerun()
+        
+    st.divider()
+    
+    # НОВАЯ КНОПКА ДЛЯ СБРОСА ЗАЛИПШИХ КЛЮЧЕЙ
+    if st.button("🗑️ Сбросить старые ключи", use_container_width=True):
+        st.session_state.csrf_token = ""
+        st.session_state.xsrf_token = ""
+        st.session_state.session_cookie = ""
+        save_cookies("", "", "")
+        st.warning("Ключи удалены! Вставь новые.")
         time.sleep(1)
         st.rerun()
 
@@ -200,7 +202,6 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                 }
                 
                 success = False
-                # Умный цикл повтора при ошибках
                 for attempt in range(3):
                     try:
                         response = requests.post("https://linkdetective.pro/api/domains", json=payload, headers=headers, cookies=cookies, timeout=20)
@@ -214,15 +215,15 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                             if isinstance(chunk_sellers, dict):
                                 all_sellers_data_initial.update(chunk_sellers)
                             success = True
-                            break # Успех - выходим из цикла попыток
+                            break 
                             
                         elif response.status_code == 429:
                             status_text.warning(f"⏳ Сервер просит притормозить (Ошибка 429). Ждем 10 секунд... (Попытка {attempt+1}/3)")
-                            time.sleep(10) # Умная пауза
+                            time.sleep(10) 
                             continue
                             
                         elif response.status_code == 419:
-                            st.error("Ошибка 419: Токен отторгается. Проверь ключи.")
+                            st.error("Ошибка 419: Токен отторгается. Нажми 'Сбросить старые ключи' слева и вставь свежие из окна Инкогнито.")
                             st.stop()
                         else:
                             st.error(f"Ошибка сервера: {response.status_code}")
@@ -236,12 +237,11 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                     st.error("Не удалось пробиться через защиту сервера после 3 попыток. Попробуй позже.")
                     st.stop()
                     
-                # Увеличенная базовая пауза между пачками, чтобы не провоцировать 429
                 time.sleep(1.5)
             
             total_items = len(all_items)
             if total_items == 0:
-                status_text.warning("Сайт не нашел данные ни по одному из указанных доменов.")
+                status_text.warning("Сайт не нашел данные ни по одному из указанных доменов. Возможно, сработал лимит аккаунта.")
             else:
                 results = []
                 sellers_details = {} 
@@ -262,7 +262,7 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                     
                     if not domain_sellers_raw:
                         domain_sellers_raw = get_sellers_for_domain(domain, headers, cookies, st.session_state.csrf_token)
-                        time.sleep(0.5) # Немного увеличил паузу при точечном запросе
+                        time.sleep(0.5) 
                     
                     domain_sellers_clean = clean_sellers_data(domain_sellers_raw)
                     sellers_details[domain] = domain_sellers_clean
