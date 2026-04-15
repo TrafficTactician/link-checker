@@ -57,25 +57,35 @@ def clean_domain(url):
     return url
 
 def get_sellers_for_domain(domain, headers, cookies, csrf_token):
+    """Точечный запрос с защитой от блокировок сервера"""
     url = "https://linkdetective.pro/api/domains"
     payload = {
         "draw": 1, "start": 0, "length": 10,
         "_token": csrf_token, "domains": [domain],
         "price": "min", "blacklist": [2, 8]
     }
-    try:
-        response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=15)
-        if response.status_code == 200:
-            data = response.json()
-            sellers = data.get('sellers', {})
-            if isinstance(sellers, dict):
-                for k, v in sellers.items():
-                    if domain in k.lower():
-                        return v
-            elif isinstance(sellers, list):
-                return sellers
-    except Exception:
-        pass
+    
+    # 3 попытки достучаться до сервера
+    for attempt in range(3):
+        try:
+            response = requests.post(url, json=payload, headers=headers, cookies=cookies, timeout=20)
+            if response.status_code == 200:
+                data = response.json()
+                sellers = data.get('sellers', {})
+                if isinstance(sellers, dict):
+                    for k, v in sellers.items():
+                        if domain in k.lower():
+                            return v
+                elif isinstance(sellers, list):
+                    return sellers
+                break # Если ответ 200, но продавцов рили нет - выходим
+            elif response.status_code == 429:
+                time.sleep(5) # Сервер просит паузу - ждем 5 сек
+            else:
+                break
+        except Exception:
+            time.sleep(3)
+            
     return []
 
 def extract_dicts(data):
@@ -120,7 +130,7 @@ st.title("🕵️‍♂️ Link Checker Pro (Аутрич)")
 
 with st.sidebar:
     st.header("🔑 Авторизация")
-    st.markdown("Вставь 3 ключа из **одной активной сессии**.")
+    st.markdown("Вставь 3 ключа из **одной активной сессии** (Режим Инкогнито работает лучше всего).")
     
     input_csrf = st.text_input("1. CSRF-TOKEN (из кода):", value=st.session_state.csrf_token, type="password")
     input_xsrf = st.text_input("2. XSRF-TOKEN (из Cookies):", value=st.session_state.xsrf_token, type="password")
@@ -142,7 +152,6 @@ with st.sidebar:
         
     st.divider()
     
-    # НОВАЯ КНОПКА ДЛЯ СБРОСА ЗАЛИПШИХ КЛЮЧЕЙ
     if st.button("🗑️ Сбросить старые ключи", use_container_width=True):
         st.session_state.csrf_token = ""
         st.session_state.xsrf_token = ""
@@ -261,8 +270,9 @@ if st.session_state.csrf_token and st.session_state.xsrf_token and st.session_st
                                 break
                     
                     if not domain_sellers_raw:
+                        # ТЕПЕРЬ ОНО БУДЕТ ДОЖИДАТЬСЯ ОТВЕТА СЕРВЕРА
                         domain_sellers_raw = get_sellers_for_domain(domain, headers, cookies, st.session_state.csrf_token)
-                        time.sleep(0.5) 
+                        time.sleep(1) # Увеличенная пауза после микро-запроса, чтобы не злить Cloudflare
                     
                     domain_sellers_clean = clean_sellers_data(domain_sellers_raw)
                     sellers_details[domain] = domain_sellers_clean
